@@ -8,7 +8,8 @@ Deploy SkinTokens (TokenRig) on **[RunPod](https://www.runpod.io/)** Serverless 
 |------|------|
 | `Dockerfile.base` | CUDA 12.8 + bpy + PyTorch 2.7 cu128 + flash-attn + ML deps; checkpoints **not** baked in |
 | `Dockerfile` | FastAPI API on top of `BASE_IMAGE` |
-| `docker-entrypoint.sh` | Symlink volume → `/app/experiments` + `/app/models`, start `bpy_server`, verify checkpoints |
+| `docker-entrypoint.sh` | Symlink volume → `/app/experiments` + `/app/models`, verify checkpoints |
+| `bpy_supervisor.py` | Supervised `bpy_server` subprocess (started from FastAPI lifespan) |
 | `scripts/ensure_checkpoints.py` | Fail fast if weights are missing |
 | `runtime.py` | TokenRig inference + UniRig-compatible JSON serialization |
 | `api.py` | HTTP service (`POST /rig`, `GET /ping`) |
@@ -101,7 +102,7 @@ RunPod is pulling `docker.io/library/skintokens-base:latest` (no Docker Hub user
 | `PORT` | `8080` | HTTP server port |
 | `PORT_HEALTH` | `8080` | Health probe port |
 
-Entrypoint links `/runpod-volume/skintokens/experiments` → `/app/experiments` and `models` → `/app/models`, starts `bpy_server` on port 59876, then uvicorn.
+Entrypoint links `/runpod-volume/skintokens/experiments` → `/app/experiments` and `models` → `/app/models`, then execs uvicorn as the foreground process. `bpy_server` is started and supervised from FastAPI lifespan (`bpy_supervisor.py`).
 
 ### Suggested endpoint settings
 
@@ -119,10 +120,12 @@ Entrypoint links `/runpod-volume/skintokens/experiments` → `/app/experiments` 
 Startup sequence:
 
 1. Symlink volume → `/app/experiments` and `/app/models`
-2. Start `bpy_server.py`, wait for `:59876/ping`
-3. HTTP server listens; `/ping` returns **204**
-4. Background thread loads TokenRig + VAE from volume
-5. `/ping` returns **200** when ready (~2–5 min typical)
+2. uvicorn starts; FastAPI lifespan starts `bpy_server` and waits for `:59876/ping`
+3. HTTP server listens; `/ping` returns **204** until bpy + TokenRig are ready
+4. Background thread loads TokenRig + VAE from the volume
+5. `/ping` returns **200** when bpy and models are ready (~2–5 min typical)
+
+`/rig` uses a **sync** handler so long GPU jobs do not block the event loop — `/ping` stays responsive during inference (required for RunPod health probes).
 
 Check worker logs for:
 

@@ -45,35 +45,6 @@ if ! python scripts/ensure_checkpoints.py; then
   exit 1
 fi
 
-# Start bpy_server sidecar (required for mesh load/export).
-python bpy_server.py &
-BPY_PID=$!
-
-cleanup() {
-  if kill -0 "$BPY_PID" 2>/dev/null; then
-    echo ">>> Stopping bpy_server (pid=$BPY_PID)"
-    kill "$BPY_PID" 2>/dev/null || true
-    wait "$BPY_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT
-
-echo ">>> Waiting for bpy_server on port 59876..."
-for _ in $(seq 1 60); do
-  if curl -sf http://127.0.0.1:59876/ping >/dev/null 2>&1; then
-    echo ">>> bpy_server is ready"
-    break
-  fi
-  if ! kill -0 "$BPY_PID" 2>/dev/null; then
-    echo ">>> ERROR: bpy_server exited before becoming ready" >&2
-    exit 1
-  fi
-  sleep 0.5
-done
-
-if ! curl -sf http://127.0.0.1:59876/ping >/dev/null 2>&1; then
-  echo ">>> ERROR: bpy_server failed to start within 30s" >&2
-  exit 1
-fi
-
+# bpy_server is started and supervised by FastAPI lifespan (bpy_supervisor.py).
+# uvicorn remains the sole foreground process for RunPod Serverless.
 exec "$@"

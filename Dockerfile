@@ -14,6 +14,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-cache -r requirements-api.txt
 
 COPY api.py .
+COPY bpy_supervisor.py .
 COPY runtime.py .
 COPY scripts/ scripts/
 COPY docker-entrypoint.sh /docker-entrypoint.sh
