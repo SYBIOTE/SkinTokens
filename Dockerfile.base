@@ -84,6 +84,9 @@ FROM blender-base AS runtime
 
 COPY --from=ml-builder /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
 
+# Verify bpy still loads after ml-builder overwrites dist-packages (numpy ABI must match).
+RUN python -c "import numpy; import bpy; print(f'bpy OK after merge: {bpy.app.version_string}, numpy {numpy.__version__}')"
+
 RUN mkdir -p /app/experiments /app/models
 
 COPY src/ src/

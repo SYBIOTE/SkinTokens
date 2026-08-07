@@ -11,6 +11,6 @@ fast-simplification
 trimesh
 open3d
 huggingface_hub
-numpy>=1.26.0
+numpy==1.26.4
 scipy
 requests

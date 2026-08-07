@@ -11,16 +11,25 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
 import threading
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
+from starlette.requests import Request
 
 from runtime import RigOptions
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(name)-18s  %(levelname)-5s  %(message)s",
+)
+logger = logging.getLogger("skintokens.api")
 
 ALLOWED_EXTENSIONS = {"obj", "fbx", "glb"}
 DEFAULT_TOP_K = 5
@@ -77,12 +86,12 @@ def _load_runtime() -> None:
     from runtime import SkinTokensRuntime
 
     app_dir = os.environ.get("SKINTOKENS_APP_DIR", "/app")
-    print(f">>> [api] Background model load started (app_dir={app_dir})")
+    logger.info("Background model load started (app_dir=%s)", app_dir)
     try:
         _runtime = SkinTokensRuntime(app_dir=app_dir)
-        print(">>> [api] Background model load finished — /ping will return 200")
+        logger.info("Background model load finished — /ping will return 200")
     except Exception as exc:
-        print(f">>> [FATAL] Failed to load runtime: {exc}")
+        logger.exception("Failed to load runtime: %s", exc)
         _load_error = str(exc)
 
 
@@ -99,6 +108,26 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SkinTokens API", version="1.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    if request.url.path == "/ping":
+        return await call_next(request)
+
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - start) * 1000
+    client = request.client.host if request.client else "unknown"
+    logger.info(
+        "%s %s %s %.1fms client=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        client,
+    )
+    return response
 
 
 @app.get("/ping")

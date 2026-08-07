@@ -10,7 +10,7 @@ bpy>=4.2
 trimesh
 open3d
 huggingface_hub
-numpy>=1.26.0
+numpy==1.26.4
 gradio
 bottle
 tornado
