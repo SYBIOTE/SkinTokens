@@ -1,0 +1,95 @@
+# SkinTokens shared base image (multi-stage) — RunPod / Docker GPU inference
+# Stage 1 (blender-base): bpy/Blender runtime + smoke test.
+# Stage 2 (ml-builder): CUDA devel — torch 2.7 cu128, flash_attn, ML deps.
+# Stage 3 (runtime): serving base on top of blender-base.
+#
+# Build (requires BuildKit; context = SkinTokens/):
+#   DOCKER_BUILDKIT=1 docker build -f Dockerfile.base -t sybiote/skintokens-base:latest .
+
+ARG CUDA_VERSION=12.8.0
+
+# ════════════════════════════════════════════════════════════════════
+# Stage 1: blender-base — isolate bpy and verify it works
+# ════════════════════════════════════════════════════════════════════
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04 AS blender-base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    XFORMERS_IGNORE_FLASH_VERSION_CHECK=1
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3-pip curl \
+    libegl1 libgbm1 libdrm2 libgl1-mesa-dri libgl1-mesa-glx \
+    libglvnd0 libopengl0 libglib2.0-0 libsm6 libxext6 libxrender1 \
+    libxxf86vm1 libxfixes3 libxi6 libxkbcommon0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+RUN pip install uv
+
+WORKDIR /app
+
+COPY requirements-blender.txt ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r requirements-blender.txt
+
+RUN python -c "import bpy; print(f'bpy OK: {bpy.app.version_string}')"
+
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/dist-packages/torch/lib:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+ENV NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility
+
+# ════════════════════════════════════════════════════════════════════
+# Stage 2: ml-builder — torch 2.7 cu128, flash_attn (prebuilt wheel), ML deps
+# ════════════════════════════════════════════════════════════════════
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS ml-builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    MAX_JOBS=4
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3.11-dev python3-pip curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+RUN pip install uv
+
+WORKDIR /build
+
+COPY requirements-torch.txt ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r requirements-torch.txt
+
+# Prebuilt wheel: torch 2.7.0 + cu128 + cp311 (kingbri1 community build)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system \
+    https://github.com/kingbri1/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu128torch2.7.0cxx11abiFALSE-cp311-cp311-linux_x86_64.whl \
+    && python -c "import torch; from flash_attn.modules.mha import MHA; print('flash_attn OK')"
+
+COPY requirements-base.txt ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r requirements-base.txt
+
+# ════════════════════════════════════════════════════════════════════
+# Stage 3: runtime — full serving base built on top of blender-base
+# ════════════════════════════════════════════════════════════════════
+FROM blender-base AS runtime
+
+COPY --from=ml-builder /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
+
+RUN mkdir -p /app/experiments /app/models
+
+COPY src/ src/
+COPY configs/ configs/
+COPY bpy_server.py .
+
+RUN python -c "from transformers import AutoConfig; AutoConfig.from_pretrained('Qwen/Qwen3-0.6B'); print('Qwen3-0.6B config cached')"
+
+ENV PORT=8080

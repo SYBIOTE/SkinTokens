@@ -99,3 +99,6 @@ coverage.xml
 *.cover
 
 # Project-specific ignores
+ckpts/*
+!ckpts/README.md
+!ckpts/.gitkeep

@@ -1,0 +1,17 @@
+.git
+.gitignore
+experiments/
+models/
+tmp_gradio/
+tmp/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+examples/
+assets/
+*.md
+!ckpts/README.md
+ckpts/
+!ckpts/.gitkeep

@@ -1,0 +1,6 @@
+# Blender runtime deps isolated from the ML stack.
+numpy>=1.26.0
+bpy>=4.2
+bottle
+tornado
+requests
