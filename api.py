@@ -182,7 +182,6 @@ def rig_mesh(
     num_beams: int = Form(DEFAULT_NUM_BEAMS),
     do_sample: bool = Form(DEFAULT_DO_SAMPLE),
     use_skeleton: bool = Form(False),
-    use_transfer: bool = Form(False),
     use_postprocess: bool = Form(False),
     voxel_resolution: int = Form(DEFAULT_VOXEL_RESOLUTION),
 ):
@@ -210,7 +209,6 @@ def rig_mesh(
         num_beams=num_beams,
         do_sample=do_sample,
         use_skeleton=use_skeleton,
-        use_transfer=use_transfer,
         use_postprocess=use_postprocess,
         voxel_resolution=voxel_resolution,
     )
