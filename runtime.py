@@ -415,9 +415,13 @@ class SkinTokensRuntime:
         # scale and origin all survive; a rigged asset nobody can texture is not
         # a useful result, so this is not something a caller should be able to
         # turn off.
+        # target_path is this request's upload, not asset.path. The asset comes
+        # from the dataloader, and on a warm worker its .path can still name a
+        # previous request's tmpdir -- already removed by the /rig finally block,
+        # so bpy would fail loading a file that no longer exists.
         payload = {
             "source_asset": asset,
-            "target_path": asset.path,
+            "target_path": input_path,
             "export_path": out_path,
             "group_per_vertex": options.group_per_vertex,
         }
