@@ -158,17 +158,7 @@ curl -sS -X POST https://YOUR_ID.api.runpod.ai/rig \
   -o rigged.glb
 ```
 
-Optional form fields: `top_k`, `top_p`, `temperature`, `repetition_penalty`,
-`num_beams`, `do_sample`, `use_skeleton`, `use_postprocess`, `voxel_resolution`.
-
-Sampling defaults match the checkpoint's own recorded `generate_kwargs`. Set
-`do_sample=false` for deterministic beam search; note that the point sampling
-feeding the encoder is still unseeded, so runs are not yet bit-reproducible.
-
-`output_format=glb` always exports through the transfer path, so the rigged GLB
-keeps the input's materials, textures, UVs, vertex colours, scale and origin.
-(There is no `use_transfer` field: the non-transfer export returns geometry with
-no appearance data at all, which is never what a caller wants.)
+Optional form fields: `top_k`, `top_p`, `temperature`, `repetition_penalty`, `num_beams`, `use_skeleton`, `use_transfer`, `use_postprocess`.
 
 ### Probes
 
