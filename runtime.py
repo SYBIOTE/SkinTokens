@@ -207,14 +207,33 @@ def _result_to_rig_json(
 
 @dataclass
 class RigOptions:
-    top_k: int = 5
+    """
+    Generation and post-processing knobs for one /rig call.
+
+    The sampling defaults below match this checkpoint's own `generate_kwargs`
+    (recorded in grpo_1400.ckpt), i.e. the settings the model was validated
+    under during RL fine-tuning. Deviating from them is a legitimate experiment
+    -- do_sample=False in particular makes a run deterministic, which matters
+    for a one-shot UX -- but it is a departure from how the policy was tuned,
+    so change the defaults only on measured evidence.
+    """
+
+    top_k: int = 10
     top_p: float = 0.95
-    temperature: float = 1.0
+    temperature: float = 1.5
     repetition_penalty: float = 2.0
     num_beams: int = 10
+    # False switches beam-sample -> deterministic beam search: same mesh always
+    # yields the same skeleton, and the beams do max-likelihood search rather
+    # than stochastic exploration. top_k/top_p/temperature are inert when False.
+    do_sample: bool = True
     use_skeleton: bool = False
     use_transfer: bool = False
     use_postprocess: bool = False
+    # Voxel grid resolution for the use_postprocess geodesic pass. Higher
+    # separates nearby surfaces (fingers, inner thighs) better, at a superlinear
+    # cost in the shortest-path solve.
+    voxel_resolution: int = 196
     group_per_vertex: int = 4
 
 
@@ -322,7 +341,7 @@ class SkinTokensRuntime:
                 "repetition_penalty": float(options.repetition_penalty),
                 "num_return_sequences": 1,
                 "num_beams": int(options.num_beams),
-                "do_sample": True,
+                "do_sample": bool(options.do_sample),
             }
 
             skeleton_tokens = None
@@ -352,7 +371,7 @@ class SkinTokensRuntime:
         asset = result.asset
         skin_for_json: np.ndarray | None = None
         if options.use_postprocess:
-            voxel = asset.voxel(resolution=196)
+            voxel = asset.voxel(resolution=int(options.voxel_resolution))
             asset.skin *= voxel_skin(
                 grid=0,
                 grid_coords=voxel.coords,

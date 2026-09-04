@@ -37,11 +37,15 @@ logging.basicConfig(
 logger = logging.getLogger("skintokens.api")
 
 ALLOWED_EXTENSIONS = {"obj", "fbx", "glb"}
-DEFAULT_TOP_K = 5
+# Defaults mirror RigOptions, which in turn mirrors the checkpoint's own
+# generate_kwargs (the settings the model was validated under during RL).
+DEFAULT_TOP_K = 10
 DEFAULT_TOP_P = 0.95
-DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TEMPERATURE = 1.5
 DEFAULT_REPETITION_PENALTY = 2.0
 DEFAULT_NUM_BEAMS = 10
+DEFAULT_DO_SAMPLE = True
+DEFAULT_VOXEL_RESOLUTION = 196
 
 _runtime: object | None = None
 _load_error: str | None = None
@@ -176,9 +180,11 @@ def rig_mesh(
     temperature: float = Form(DEFAULT_TEMPERATURE),
     repetition_penalty: float = Form(DEFAULT_REPETITION_PENALTY),
     num_beams: int = Form(DEFAULT_NUM_BEAMS),
+    do_sample: bool = Form(DEFAULT_DO_SAMPLE),
     use_skeleton: bool = Form(False),
     use_transfer: bool = Form(False),
     use_postprocess: bool = Form(False),
+    voxel_resolution: int = Form(DEFAULT_VOXEL_RESOLUTION),
 ):
     """Unified TokenRig pipeline. Returns UniRig-compatible JSON or rigged GLB.
 
@@ -193,21 +199,38 @@ def rig_mesh(
     filename = file.filename or "mesh.glb"
     ext = _validate_extension(filename)
 
+    if not 16 <= voxel_resolution <= 512:
+        raise HTTPException(400, "voxel_resolution must be between 16 and 512")
+
     options = RigOptions(
         top_k=top_k,
         top_p=top_p,
         temperature=temperature,
         repetition_penalty=repetition_penalty,
         num_beams=num_beams,
+        do_sample=do_sample,
         use_skeleton=use_skeleton,
         use_transfer=use_transfer,
         use_postprocess=use_postprocess,
+        voxel_resolution=voxel_resolution,
     )
 
     tmpdir = tempfile.mkdtemp(prefix="skintokens_rig_")
     try:
         input_path = os.path.join(tmpdir, f"input.{ext}")
-        logger.info("Rig request: file=%s format=%s", filename, output_format)
+        logger.info(
+            "Rig request: file=%s format=%s beams=%d do_sample=%s rep=%.2f "
+            "top_k=%d temp=%.2f postprocess=%s voxel=%d",
+            filename,
+            output_format,
+            num_beams,
+            do_sample,
+            repetition_penalty,
+            top_k,
+            temperature,
+            use_postprocess,
+            voxel_resolution,
+        )
         _save_upload(file, input_path)
         logger.info("Upload saved (%d bytes) -> %s", os.path.getsize(input_path), input_path)
 
