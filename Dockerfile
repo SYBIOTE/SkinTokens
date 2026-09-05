@@ -1,43 +1,45 @@
-# SkinTokens API (production) — RunPod Serverless
-# Thin layer on Dockerfile.base: FastAPI + uvicorn + entrypoint.
+# SkinTokens — RunPod Serverless (queue) worker.
 #
-# Build context must be SkinTokens/ (monorepo subdir).
+# Thin layer on Dockerfile.base, same as Dockerfile, but the process is a queue
+# consumer rather than a uvicorn server:
 #
 #   DOCKER_BUILDKIT=1 docker build -f Dockerfile.base -t sybiote/skintokens-base:latest .
-#   DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE=sybiote/skintokens-base:latest -f Dockerfile -t sybiote/skintokens-api:latest .
+#   DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE=sybiote/skintokens-base:latest \
+#       -t sybiote/skintokens-queue:latest .
+#
+# This is `Dockerfile` on the runpod-queue branch because RunPod's Git build
+# builds that path per branch: the image it produces is named after the branch
+# (sybiote-skintokens-runpod-queue-dockerfile). The HTTP/load-balancer image
+# lives at Dockerfile.http here and remains `Dockerfile` on main.
+#
+# No port is exposed and there is no HTTP healthcheck: the worker pulls jobs off
+# the queue rather than serving requests, so readiness is the SDK connecting,
+# not a socket accepting.
 
 ARG BASE_IMAGE=docker.io/sybiote/skintokens-base:latest
 FROM ${BASE_IMAGE}
 
-COPY requirements-api.txt .
+COPY requirements-api.txt requirements-queue.txt ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-cache -r requirements-api.txt
+    uv pip install --system --no-cache -r requirements-api.txt -r requirements-queue.txt
 
 # Re-copy everything Dockerfile.base bakes in. RunPod builds this file from git
 # on top of a base image pulled from Docker Hub, so anything this branch changes
 # under src/, configs/ or bpy_server.py is invisible at runtime unless it is
-# copied again here -- the base carries whatever was current when it was last
-# pushed. Skipping this silently ships stale code: a fix can be committed,
-# built and rolled out while every worker still runs the old file.
+# copied again here. Skipping this ships stale code while every signal — build
+# completed, new image tag, workers rolled out — says otherwise.
 COPY src/ src/
 COPY configs/ configs/
 COPY bpy_server.py .
 
-COPY api.py .
-COPY bpy_supervisor.py .
-COPY runtime.py .
+COPY runtime.py bpy_supervisor.py handler.py ./
 COPY scripts/ scripts/
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
 ENV SKINTOKENS_APP_DIR=/app
-ENV PORT=8080
-ENV PORT_HEALTH=8080
 
-EXPOSE 8080
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
-    CMD curl -f http://localhost:${PORT_HEALTH:-${PORT:-8080}}/ping || exit 1
-
+# The entrypoint links the checkpoints in from the network volume and verifies
+# them; it execs whatever follows, so the queue consumer replaces uvicorn here.
 ENTRYPOINT ["/docker-entrypoint.sh"]
-CMD ["sh", "-c", "exec python -m uvicorn api:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1 --no-access-log"]
+CMD ["python", "-u", "handler.py"]
