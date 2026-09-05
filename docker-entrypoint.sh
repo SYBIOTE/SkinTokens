@@ -45,6 +45,8 @@ if ! python scripts/ensure_checkpoints.py; then
   exit 1
 fi
 
-# bpy_server is started and supervised by FastAPI lifespan (bpy_supervisor.py).
-# uvicorn remains the sole foreground process for RunPod Serverless.
+# bpy_server is started and supervised by whichever process runs in the
+# foreground (bpy_supervisor.py): FastAPI's lifespan for the HTTP image,
+# handler.py at import for the queue image. Either way exactly one foreground
+# process remains, which is what RunPod Serverless expects.
 exec "$@"

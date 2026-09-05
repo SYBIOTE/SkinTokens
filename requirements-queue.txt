@@ -1,0 +1,2 @@
+# RunPod queue-endpoint worker (handler.py).
+runpod>=1.7.0
