@@ -35,8 +35,20 @@ guardian's output lands on the line. The job must carry references, not bytes.
 
 ## Design: presigned S3 both directions
 
-The SaaS already stages the input GLB in S3 (`staging-storage.ts`) and has both
-`PutObjectCommand` and `GetObjectCommand` presigning. So:
+Nothing new has to be built to hold the bytes. The studio **already** uploads the
+input GLB to S3 staging before calling /rig — `uploadGlbToStaging` on the client,
+`stagingObjectKey(userId, chatId)` on the server — and today the SaaS downloads
+it again just to forward it as multipart. The queue version simply hands the
+worker a presigned URL for the object that is already there, and the download
+in `rig-from-staging.ts` goes away.
+
+The result rides the same staging area: a sibling key under the same chat
+prefix, written with the existing `lifecycle=staging` tag so the bucket's expiry
+rule reaps it, and deleted explicitly on success exactly as
+`deleteStagingInputGlb` already does for the input. Ephemeral by construction —
+no new bucket, no new lifecycle policy, no long-lived artifacts.
+
+So:
 
     job input  = {"op": "rig",
                   "input_url":  "<presigned GET for the staged upload>",
@@ -48,7 +60,8 @@ The SaaS already stages the input GLB in S3 (`staging-storage.ts`) and has both
 
 The worker downloads from `input_url`, runs the existing `export_rig_glb`, and
 uploads the result to `output_url`. Nothing large crosses the queue, and the
-worker needs no AWS credentials — the presigned URLs are the capability.
+worker needs no AWS credentials — the presigned URLs are the capability, scoped
+to one object and expiring on their own.
 
 ## Server work
 
