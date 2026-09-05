@@ -1,193 +1,105 @@
-# RunPod (Serverless) — SkinTokens API
+# RunPod (Serverless) — SkinTokens queue worker
 
-Deploy SkinTokens (TokenRig) on **[RunPod](https://www.runpod.io/)** Serverless with a **network volume** for checkpoints. This guide uses a **shared volume** with HY-Motion and UniRig.
+SkinTokens runs on a RunPod Serverless **queue** endpoint with a **network
+volume** for checkpoints, shared with HY-Motion, Kimodo and UniRig.
+
+## Why a queue and not a load balancer
+
+The load-balancer endpoint could not serve this workload. Its gateway gives up
+around 30s and returns 502 while the worker keeps going — `leon.glb` (86,855
+verts) logged `POST /rig 200 32191ms` server-side for a request the client had
+already lost. The GPU work was paid for and discarded, and anything much past
+16k vertices sat in that range.
+
+| model | verts | work | load balancer | queue |
+|-------|-------|------|---------------|-------|
+| Guardian_male_fixed.glb | 16,674 | ~22s | 200 | COMPLETED 59.2s |
+| leon.glb | 86,855 | ~32s | **502, always** | COMPLETED 31.2s |
+
+A queue job has no such ceiling: a cold worker makes a job slower, never failed.
+
+The HTTP/FastAPI deployment is preserved on the **`runpod-load-balancer`**
+branch if it is ever needed again.
 
 ## Layout
 
 | File | Role |
 |------|------|
 | `Dockerfile.base` | CUDA 12.8 + bpy + PyTorch 2.7 cu128 + flash-attn + ML deps; checkpoints **not** baked in |
-| `Dockerfile` | FastAPI API on top of `BASE_IMAGE` |
-| `docker-entrypoint.sh` | Symlink volume → `/app/experiments` + `/app/models`, verify checkpoints |
-| `bpy_supervisor.py` | Supervised `bpy_server` subprocess (started from FastAPI lifespan) |
-| `scripts/ensure_checkpoints.py` | Fail fast if weights are missing |
-| `runtime.py` | TokenRig inference + UniRig-compatible JSON serialization |
-| `api.py` | HTTP service (`POST /rig`, `GET /ping`) |
+| `Dockerfile` | Queue worker on top of the base (built by RunPod from this branch) |
+| `handler.py` | `runpod.serverless.start`; owns `bpy_server`, warms the model at import |
+| `docker-entrypoint.sh` | Links checkpoints in from the volume, verifies them, execs the handler |
 
-## Checkpoints (~6–8 GB)
+`Dockerfile` **re-copies `src/`, `configs/` and `bpy_server.py`**. RunPod builds
+it on top of a base image pulled from Docker Hub, so anything changed in those
+paths is invisible at runtime unless copied again — skipping it ships stale code
+while every signal (build completed, new image tag, workers rolled out) says
+otherwise.
 
-Three items required at runtime:
+## Job contract
 
-```
-experiments/skin_vae_2_10_32768/last.ckpt
-experiments/articulation_xl_quantization_256_token_4/grpo_1400.ckpt
-models/Qwen3-0.6B/          # config only
-```
+Payloads travel by reference. RunPod caps a `/status` body near 2MB, and base64
+puts leon at 6.7MB in and ~9MB out, so the job carries presigned S3 URLs and the
+handler returns a receipt. The worker holds no AWS credentials: each URL is a
+capability scoped to one object.
 
-Download locally (one-time): `make ckpts` — see [ckpts/README.md](ckpts/README.md).
-
-## Shared network volume
-
-Recommended layout on one volume (same datacenter as HY-Motion / UniRig):
-
-```
-/runpod-volume/
-  ckpts/          ← HY-Motion
-  unirig/         ← UniRig
-  skintokens/
-    experiments/
-      skin_vae_2_10_32768/last.ckpt
-      articulation_xl_quantization_256_token_4/grpo_1400.ckpt
-    models/
-      Qwen3-0.6B/
+```jsonc
+// POST /v2/{endpointId}/run
+{"input": {
+  "op": "rig",
+  "input_url":  "<presigned GET for the staged upload>",
+  "output_url": "<presigned PUT for the result>",
+  "output_format": "glb",          // or "json"
+  "use_postprocess": true,          // default true
+  // optional generation knobs: top_k, top_p, temperature,
+  // repetition_penalty, num_beams, do_sample, voxel_resolution
+}}
 ```
 
-**Volume size:** add ~8 GB for SkinTokens on top of existing HY-Motion + UniRig usage.
-
-### Seed weights via S3 API
-
-From `SkinTokens/` after `make ckpts`:
-
-```bash
-aws s3 sync ckpts/experiments/ s3://YOUR_VOLUME_ID/skintokens/experiments/ \
-  --region eu-ro-1 --endpoint-url https://s3api-eu-ro-1.runpod.io/
-
-aws s3 sync ckpts/models/ s3://YOUR_VOLUME_ID/skintokens/models/ \
-  --region eu-ro-1 --endpoint-url https://s3api-eu-ro-1.runpod.io/
+```jsonc
+// GET /v2/{endpointId}/status/{id}
+{"status": "COMPLETED",
+ "output": {"bytes": 1473432, "content_type": "model/gltf-binary"}}
 ```
 
-Verify all three checkpoint paths exist under `skintokens/`.
+Handler failures come back as `{"error": "...", "code": "..."}` rather than a
+dead worker. Presigned URLs are never echoed into an error message.
 
-## Build & push
+## Endpoint settings
 
-Context must be **`SkinTokens/`** (monorepo):
+| Setting | Value |
+|---------|-------|
+| Type | **Queue** (fixed at creation — cannot be changed later) |
+| Branch | `runpod-queue` |
+| Data center | **EU-RO-1** (where the volume lives) |
+| Network volume | `nirvana` (`vpwhvs7cia`) |
+| Execution timeout | 600000 ms |
+| Workers | min 0, max 2–3 |
 
-```bash
-cd SkinTokens
-DOCKER_BUILDKIT=1 docker build -f Dockerfile.base -t YOUR_USER/skintokens-base:latest .
-docker push YOUR_USER/skintokens-base:latest
+No `PORT` / `PORT_HEALTH` and no exposed ports: the worker pulls jobs rather
+than serving requests, so readiness is the SDK connecting, not a socket
+accepting. Leave the **Model** field blank — the checkpoints come from the
+network volume, which is faster and not limited to one model per endpoint.
 
-docker build --build-arg BASE_IMAGE=docker.io/YOUR_USER/skintokens-base:latest \
-  -f Dockerfile -t YOUR_USER/skintokens-api:latest .
-docker push YOUR_USER/skintokens-api:latest
-```
+The entrypoint links `/runpod-volume/skintokens/experiments` → `/app/experiments`
+and `models` → `/app/models`, verifies them, then execs `handler.py`, which
+starts `bpy_server` on :59876 and loads TokenRig (~15s) before taking jobs.
 
-**Note:** `api.py`, `runtime.py`, and `docker-entrypoint.sh` live in the thin `Dockerfile` layer. Rebuild **only** `Dockerfile` after those change. Rebuild `Dockerfile.base` when `src/`, `configs/`, or ML deps change.
+## Client
 
-In RunPod Git/Docker build, set build arg **`BASE_IMAGE=docker.io/YOUR_USER/skintokens-base:latest`**.
+`SKINTOKENS_ENDPOINT_ID` selects the endpoint; `SKINTOKENS_RUNPOD_API_KEY` is an
+endpoint-scoped key, falling back to the account-wide `RUNPOD_API_KEY` with a
+one-time warning. See `nirvana-animate-saas/src/server/skintokens/queue-client.ts`.
 
-### Troubleshooting Git build: `skintokens-base:latest: pull access denied`
-
-RunPod is pulling `docker.io/library/skintokens-base:latest` (no Docker Hub user). Fix:
-
-1. **Build arg** in RunPod endpoint → Edit → Build → add:
-   - Name: `BASE_IMAGE`
-   - Value: `docker.io/YOUR_USER/skintokens-base:latest`
-2. **Push base first:** `docker push YOUR_USER/skintokens-base:latest` (repo must be **public**, or add registry credentials in RunPod).
-
-## RunPod Serverless endpoint
-
-1. Attach the **same network volume** as HY-Motion / UniRig (same datacenter).
-2. Worker image: **`skintokens-api`**.
-3. **Load balancer** endpoint (direct HTTP to FastAPI paths).
-
-### Environment
-
-| Variable | Example | Notes |
-|----------|---------|--------|
-| `SKINTOKENS_APP_DIR` | `/app` | App root |
-| `SKINTOKENS_CKPTS_ROOT` | `/runpod-volume/skintokens` | Optional; auto-detected if dir exists |
-| `SKINTOKENS_MODEL_CKPT` | `experiments/articulation_xl_quantization_256_token_4/grpo_1400.ckpt` | TokenRig checkpoint (default) |
-| `NVIDIA_DRIVER_CAPABILITIES` | `graphics,compute,utility` | Required for Blender headless |
-| `PORT` | `8080` | HTTP server port |
-| `PORT_HEALTH` | `8080` | Health probe port |
-
-Entrypoint links `/runpod-volume/skintokens/experiments` → `/app/experiments` and `models` → `/app/models`, then execs uvicorn as the foreground process. `bpy_server` is started and supervised from FastAPI lifespan (`bpy_supervisor.py`).
-
-### Suggested endpoint settings
-
-| Setting | Value | Why |
-|---------|--------|-----|
-| GPU | L4 24GB or RTX 4090 | TokenRig + VAE + Qwen backbone needs ≥14 GB VRAM |
-| Datacenter | Same as network volume | Avoid cross-region volume latency |
-| Request timeout | 600s | Unified autoregressive rigging can take several minutes |
-| Active workers | `1` | Avoid cold start on every request |
-| Max workers | `1` | One GPU process per worker |
-| Expose HTTP Ports | `8080` | Must match `PORT` / `PORT_HEALTH` |
-
-### Cold start
-
-Startup sequence:
-
-1. Symlink volume → `/app/experiments` and `/app/models`
-2. uvicorn starts; FastAPI lifespan starts `bpy_server` and waits for `:59876/ping`
-3. HTTP server listens; `/ping` returns **204** until bpy + TokenRig are ready
-4. Background thread loads TokenRig + VAE from the volume
-5. `/ping` returns **200** when bpy and models are ready (~2–5 min typical)
-
-`/rig` uses a **sync** handler so long GPU jobs do not block the event loop — `/ping` stays responsive during inference (required for RunPod health probes).
-
-Check worker logs for:
+## Checkpoints on the volume
 
 ```
->>> [runtime] Loading TokenRig from ...
->>> [runtime] TokenRig ready (...s elapsed)
->>> [api] Background model load finished — /ping will return 200
+/runpod-volume/skintokens/
+├── experiments/
+│   ├── articulation_xl_quantization_256_token_4/grpo_1400.ckpt
+│   └── skin_vae_2_10_32768/last.ckpt
+└── models/Qwen3-0.6B/
 ```
 
-### HTTP API
-
-Auth (load balancer): `Authorization: Bearer YOUR_RUNPOD_API_KEY`
-
-```bash
-# Health
-curl -sS https://YOUR_ID.api.runpod.ai/ping \
-  -H "Authorization: Bearer $RUNPOD_API_KEY"
-
-# Rig (JSON — UniRig-compatible schema)
-curl -sS -X POST https://YOUR_ID.api.runpod.ai/rig \
-  -H "Authorization: Bearer $RUNPOD_API_KEY" \
-  -F "file=@model.glb" \
-  -F "output_format=json"
-
-# Rig (GLB export)
-curl -sS -X POST https://YOUR_ID.api.runpod.ai/rig \
-  -H "Authorization: Bearer $RUNPOD_API_KEY" \
-  -F "file=@model.glb" \
-  -F "output_format=glb" \
-  -o rigged.glb
-```
-
-Optional form fields: `top_k`, `top_p`, `temperature`, `repetition_penalty`,
-`num_beams`, `do_sample`, `use_skeleton`, `use_postprocess`, `voxel_resolution`.
-
-Sampling defaults match the checkpoint's own recorded `generate_kwargs`. Set
-`do_sample=false` for deterministic beam search; note that the point sampling
-feeding the encoder is still unseeded, so runs are not yet bit-reproducible.
-
-`output_format=glb` always exports through the transfer path, so the rigged GLB
-keeps the input's materials, textures, UVs, vertex colours, scale and origin.
-(There is no `use_transfer` field: the non-transfer export returns geometry with
-no appearance data at all, which is never what a caller wants.)
-
-`use_postprocess` defaults to **true**: the geodesic voxel pass runs over the
-real mesh at full resolution and is what stops weights bleeding across gaps the
-encoder's 512-point view cannot resolve.
-
-`use_skeleton` does **not** preserve the input skeleton, despite what upstream's
-README implies. The input rig tokenizes correctly (a 90-joint `mixamorig` rig
-round-trips to 90 bones), but `decode` re-derives the skeleton from the
-generated sequence rather than the prefix, so the result is a fresh skeleton
-with `bone_N` names -- 74 joints for that same 90-joint input. Treat it as
-"condition on the input rig", not "keep it".
-
-### Probes
-
-- `GET /ping` — **204** while TokenRig loads, **200** when ready
-- `GET /health` — same semantics as `/ping`
-
-## References
-
-- Local checkpoints: [ckpts/README.md](ckpts/README.md)
-- UniRig RunPod (shared volume): [../UniRig/RUNPOD.md](../UniRig/RUNPOD.md)
-- HY-Motion RunPod: [../HY-Motion-1.0/RUNPOD.md](../HY-Motion-1.0/RUNPOD.md)
+Seed once with `python download.py --model` and copy the result up, or pull
+directly on a pod attached to the volume.

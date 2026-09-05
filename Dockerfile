@@ -7,10 +7,9 @@
 #   DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE=sybiote/skintokens-base:latest \
 #       -t sybiote/skintokens-queue:latest .
 #
-# This is `Dockerfile` on the runpod-queue branch because RunPod's Git build
-# builds that path per branch: the image it produces is named after the branch
-# (sybiote-skintokens-runpod-queue-dockerfile). The HTTP/load-balancer image
-# lives at Dockerfile.http here and remains `Dockerfile` on main.
+# RunPod's Git build builds this path per branch, naming the image after it
+# (sybiote-skintokens-runpod-queue-dockerfile). The HTTP/load-balancer image is
+# preserved on the runpod-load-balancer branch.
 #
 # No port is exposed and there is no HTTP healthcheck: the worker pulls jobs off
 # the queue rather than serving requests, so readiness is the SDK connecting,
@@ -19,9 +18,11 @@
 ARG BASE_IMAGE=docker.io/sybiote/skintokens-base:latest
 FROM ${BASE_IMAGE}
 
-COPY requirements-api.txt requirements-queue.txt ./
+# fastapi/uvicorn/python-multipart are not installed here: the queue worker has
+# no HTTP surface. See the runpod-load-balancer branch for that image.
+COPY requirements-queue.txt ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-cache -r requirements-api.txt -r requirements-queue.txt
+    uv pip install --system --no-cache -r requirements-queue.txt
 
 # Re-copy everything Dockerfile.base bakes in. RunPod builds this file from git
 # on top of a base image pulled from Docker Hub, so anything this branch changes

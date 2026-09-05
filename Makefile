@@ -1,5 +1,5 @@
 # SkinTokens — build for RunPod / local Docker
-.PHONY: ckpts build-base build-api build push-base push-api push
+.PHONY: ckpts build-base build-queue build push-base push-queue push
 
 DOCKER_BUILD := DOCKER_BUILDKIT=1 docker build
 IMAGE_USER ?= sybiote
@@ -19,16 +19,16 @@ ckpts:
 build-base:
 	$(DOCKER_BUILD) -f Dockerfile.base -t $(IMAGE_USER)/skintokens-base:latest .
 
-build-api: build-base
+build-queue: build-base
 	$(DOCKER_BUILD) --build-arg BASE_IMAGE=$(IMAGE_USER)/skintokens-base:latest \
-		-f Dockerfile -t $(IMAGE_USER)/skintokens-api:latest .
+		-f Dockerfile -t $(IMAGE_USER)/skintokens-queue:latest .
 
-build: build-api
+build: build-queue
 
 push-base:
 	docker push $(IMAGE_USER)/skintokens-base:latest
 
-push-api:
-	docker push $(IMAGE_USER)/skintokens-api:latest
+push-queue:
+	docker push $(IMAGE_USER)/skintokens-queue:latest
 
-push: push-base push-api
+push: push-base push-queue
