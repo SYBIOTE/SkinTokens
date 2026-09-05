@@ -302,6 +302,16 @@ def extract_mesh(bones=None):
     meshes = []
     for v in bpy.data.objects:
         if v.type == 'MESH':
+            # Ignore geometry the glTF never references from its scene graph.
+            # Blender's importer parks such nodes in an "Orphan Nodes"
+            # collection outside the view layer: no viewer renders them, and
+            # they cannot even be selected later when weights are bound. Files
+            # carry these as unused variants (Guardian ships three hair meshes
+            # and uses one), so they must be dropped here rather than at export
+            # -- the asset's vertex partition is what get_vertex_slice indexes,
+            # and filtering later would misalign skin weights with meshes.
+            if bpy.context.view_layer.objects.get(v.name) is None:
+                continue
             meshes.append(v)
     
     index = {}
@@ -492,6 +502,12 @@ def make_asset(
     mesh_names = []
     for v in bpy.data.objects:
         if v.type == 'MESH':
+            # Must mirror extract_mesh's filter exactly: geometry the glTF never
+            # references sits outside the view layer, cannot be selected, and is
+            # absent from the asset -- so including it here would both raise and
+            # misalign mesh_names[i] against asset.get_vertex_slice(i).
+            if bpy.context.view_layer.objects.get(v.name) is None:
+                continue
             objects.append(v)
             mesh_names.append(v.name)
     
@@ -587,8 +603,15 @@ def make_asset(
         if root_tail is False:
             tails[root_id] = joints[root_id] + np.array([0., 0., length])
         bpy.ops.object.armature_add(enter_editmode=True)
-        armature = bpy.data.armatures.get('Armature')
-        armature_name = asset.armature_name if asset.armature_name is not None else 'Armature'
+        # armature_add names the new object; take that name rather than the
+        # asset's. asset.armature_name is carried over from the SOURCE model, so
+        # on an input that already has a rig (e.g. "Armature.Male") it names an
+        # object that does not exist here, and the bpy.data.objects lookup below
+        # raises KeyError. Blender also uniquifies on collision, so the created
+        # object may be "Armature.001" even in the default case.
+        armature_object = bpy.context.object
+        armature = armature_object.data
+        armature_name = armature_object.name
         
         edit_bones = armature.edit_bones
         
@@ -654,9 +677,19 @@ def make_asset(
                 group_per_vertex = vertex_group_reweight.shape[-1]
             if not do_not_normalize:
                 vertex_group_reweight = vertex_group_reweight / vertex_group_reweight[..., :group_per_vertex].sum(axis=1)[...,None]
-            # clean vertex groups first in case skin exists
+            # clean vertex groups first in case skin exists.
+            #
+            # The index range must be bounded by the mesh's own vertex count:
+            # passing indices past the end makes Blender read out of bounds and
+            # segfault (a hardcoded 990 crashes on, say, a 98-vertex eye mesh).
+            # Only groups this armature owns are cleared -- an input that
+            # arrives already rigged keeps its original groups, and clearing a
+            # name that is not on this mesh would raise KeyError anyway.
+            n_verts = len(ob.data.vertices)
             for name in joint_names:
-                ob.vertex_groups[name].remove(range(990))
+                vg = ob.vertex_groups.get(name)
+                if vg is not None:
+                    vg.remove(range(n_verts))
             for v, w in enumerate(skin):
                 for ii in range(group_per_vertex):
                     j = argsorted[v, ii]

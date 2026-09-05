@@ -228,8 +228,11 @@ class RigOptions:
     # than stochastic exploration. top_k/top_p/temperature are inert when False.
     do_sample: bool = True
     use_skeleton: bool = False
-    use_transfer: bool = False
-    use_postprocess: bool = False
+    # Geodesic voxel refinement of the predicted weights. On by default: it runs
+    # over the real mesh at full resolution and is the only thing that stops
+    # weights bleeding across gaps the 512-point encoder cannot resolve
+    # (fingers, inner thighs), so a caller has to opt out rather than opt in.
+    use_postprocess: bool = True
     # Voxel grid resolution for the use_postprocess geodesic pass. Higher
     # separates nearby surfaces (fingers, inner thighs) better, at a superlinear
     # cost in the shortest-path solve.
@@ -401,21 +404,32 @@ class SkinTokensRuntime:
         with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as handle:
             out_path = handle.name
 
-        if options.use_transfer:
-            payload = {
-                "source_asset": asset,
-                "target_path": asset.path,
-                "export_path": out_path,
-                "group_per_vertex": options.group_per_vertex,
-            }
-            res = _post_bpy_payload("transfer", payload)
-        else:
-            payload = {
-                "asset": asset,
-                "filepath": out_path,
-                "group_per_vertex": options.group_per_vertex,
-            }
-            res = _post_bpy_payload("export", payload)
+        # Always export through the transfer path.
+        #
+        # Asset carries geometry and skeleton only -- it has no fields for UVs,
+        # materials or textures -- so the plain "export" path rebuilds bare
+        # meshes from raw arrays and silently drops every appearance attribute:
+        # a textured input comes back with 0 materials, 0 textures and no
+        # TEXCOORD/COLOR channels, which also makes the texture unrecoverable
+        # downstream since the UVs are gone too.
+        #
+        # "transfer" re-exports with use_origin=True, which keeps the original
+        # file's Blender scene loaded so make_asset binds vertex groups onto the
+        # real mesh objects. Materials, textures, UVs, vertex colours, original
+        # scale and origin all survive; a rigged asset nobody can texture is not
+        # a useful result, so this is not something a caller should be able to
+        # turn off.
+        # target_path is this request's upload, not asset.path. The asset comes
+        # from the dataloader, and on a warm worker its .path can still name a
+        # previous request's tmpdir -- already removed by the /rig finally block,
+        # so bpy would fail loading a file that no longer exists.
+        payload = {
+            "source_asset": asset,
+            "target_path": input_path,
+            "export_path": out_path,
+            "group_per_vertex": options.group_per_vertex,
+        }
+        res = _post_bpy_payload("transfer", payload)
 
         if res != "ok":
             raise RuntimeError(f"bpy_server export failed: {res}")

@@ -158,7 +158,28 @@ curl -sS -X POST https://YOUR_ID.api.runpod.ai/rig \
   -o rigged.glb
 ```
 
-Optional form fields: `top_k`, `top_p`, `temperature`, `repetition_penalty`, `num_beams`, `use_skeleton`, `use_transfer`, `use_postprocess`.
+Optional form fields: `top_k`, `top_p`, `temperature`, `repetition_penalty`,
+`num_beams`, `do_sample`, `use_skeleton`, `use_postprocess`, `voxel_resolution`.
+
+Sampling defaults match the checkpoint's own recorded `generate_kwargs`. Set
+`do_sample=false` for deterministic beam search; note that the point sampling
+feeding the encoder is still unseeded, so runs are not yet bit-reproducible.
+
+`output_format=glb` always exports through the transfer path, so the rigged GLB
+keeps the input's materials, textures, UVs, vertex colours, scale and origin.
+(There is no `use_transfer` field: the non-transfer export returns geometry with
+no appearance data at all, which is never what a caller wants.)
+
+`use_postprocess` defaults to **true**: the geodesic voxel pass runs over the
+real mesh at full resolution and is what stops weights bleeding across gaps the
+encoder's 512-point view cannot resolve.
+
+`use_skeleton` does **not** preserve the input skeleton, despite what upstream's
+README implies. The input rig tokenizes correctly (a 90-joint `mixamorig` rig
+round-trips to 90 bones), but `decode` re-derives the skeleton from the
+generated sequence rather than the prefix, so the result is a fresh skeleton
+with `bone_N` names -- 74 joints for that same 90-joint input. Treat it as
+"condition on the input rig", not "keep it".
 
 ### Probes
 
