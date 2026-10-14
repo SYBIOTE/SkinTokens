@@ -809,6 +809,33 @@ def estimate_similarity_transform(
         return _umeyama_similarity(src, tgt)
     return _pca_similarity(src, tgt, max_points)
 
+def _export_weights_on_existing_armature(source_asset, target_asset, export_path, group_per_vertex):
+    from ..weights_only import weights_in_target_order, sparse_weights
+    skin = weights_in_target_order(source_asset, target_asset)
+    indices, weights = sparse_weights(skin, group_per_vertex)
+    names = list(target_asset.joint_names)
+    # Keep the imported armature, rest matrices, parenting and modifiers intact.
+    for i, mesh_name in enumerate(target_asset.mesh_names):
+        obj = bpy.data.objects[str(mesh_name)]
+        rows = target_asset.get_vertex_slice(i)
+        if len(obj.data.vertices) != len(skin[rows]):
+            raise ValueError("AI weights vertex partition no longer matches Blender mesh")
+        groups = []
+        for name in names:
+            group = obj.vertex_groups.get(name)
+            if group is None:
+                group = obj.vertex_groups.new(name=name)
+            if len(obj.data.vertices):
+                group.remove(range(len(obj.data.vertices)))
+            groups.append(group)
+        for vertex, (joints, values) in enumerate(zip(indices[rows], weights[rows])):
+            for joint, weight in zip(joints, values):
+                if weight > 0:
+                    groups[int(joint)].add([vertex], float(weight), 'REPLACE')
+    BpyParser._safe_make_dir(export_path)
+    bpy.ops.export_scene.gltf(filepath=export_path)
+
+
 def transfer_rigging(
     source_asset: Asset,
     target_path: str,
@@ -819,6 +846,11 @@ def transfer_rigging(
     assert source_asset.parents is not None
     
     target_asset = BpyParser.load(filepath=target_path)
+    if kwargs.pop('preserve_skeleton', False):
+        _export_weights_on_existing_armature(
+            source_asset, target_asset, export_path, kwargs.get('group_per_vertex', 4))
+        clean_bpy()
+        return
     bpy.ops.outliner.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
     data_types = [
         bpy.data.actions,

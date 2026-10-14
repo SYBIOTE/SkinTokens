@@ -9,7 +9,7 @@ import os
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,8 @@ from torch import Tensor
 
 from src.data.dataset import DatasetConfig, RigDatasetModule
 from src.data.transform import Transform
+from src.data.augment import AugmentNormalize
+from src.rig_package.weights_only import restore_conditioned_skeleton
 from src.data.vertex_group import voxel_skin
 from src.model.tokenrig import TokenRigResult
 from src.rig_package.info.asset import Asset
@@ -240,6 +242,31 @@ class RigOptions:
     group_per_vertex: int = 4
 
 
+def _transform_for_rig_mode(transform: Transform, use_skeleton: bool) -> Transform:
+    """Keep unweighted authored joints when conditioning on an existing rig."""
+    if not use_skeleton:
+        return transform
+    # Training-time deletion, collapsing, pose and jitter are not authoring edits.
+    augments = [
+        replace(augment, random_scale_p=0., random_shift_p=0.)
+        for augment in (transform.augments or []) if isinstance(augment, AugmentNormalize)
+    ]
+    return replace(transform, order=None, augments=augments)
+
+
+class _WeightsTransform:
+    def __init__(self, transform):
+        self.transform = transform
+
+    def apply(self, asset, **kwargs):
+        if asset.parents is None or asset.joint_names is None:
+            raise ValueError("AI weights requires an imported skeleton")
+        if np.count_nonzero(asset.parents == -1) != 1 or len(asset.dfs_order) != asset.J:
+            raise ValueError("AI weights requires one connected skeleton")
+        asset.set_order(asset.dfs_order, do_not_normalize=True)
+        self.transform.apply(asset, **kwargs)
+
+
 class SkinTokensRuntime:
     """Persistent TokenRig runtime."""
 
@@ -317,7 +344,8 @@ class SkinTokensRuntime:
 
         module = RigDatasetModule(
             predict_dataset_config=dataset_config,
-            predict_transform=self._transform,
+            predict_transform=(_WeightsTransform(_transform_for_rig_mode(self._transform, True))
+                               if options.use_skeleton else self._transform),
             tokenizer=self._tokenizer,
             process_fn=self._model._process_fn,
         )
@@ -352,6 +380,15 @@ class SkinTokensRuntime:
                 mask = batch["skeleton_mask"][0] == 1
                 skeleton_tokens = batch["skeleton_tokens"][0][mask].cpu().numpy()
 
+            if options.use_skeleton and (skeleton_tokens is None or skeleton_tokens.size == 0):
+                raise RuntimeError("AI weighting requires an existing skeleton, but preprocessing produced no skeleton tokens")
+            if options.use_skeleton:
+                conditioned = batch["model_input"][0].asset
+                decoded = self._tokenizer.detokenize(ids=skeleton_tokens)
+                if decoded.J != conditioned.J or not np.array_equal(decoded.parents, conditioned.parents):
+                    raise ValueError("Skeleton tokenization changed the supplied hierarchy; separate overlapping joints before AI weighting")
+                print(f">>> [runtime] AI weights: conditioning on {conditioned.J} authored bones ({skeleton_tokens.size} tokens)")
+
             normalized_sampled_vertices = (
                 batch["vertices"][0].detach().float().cpu().numpy()
             )
@@ -364,6 +401,9 @@ class SkinTokensRuntime:
                 make_asset=True,
             )["results"]
             result = preds[0]
+            if options.use_skeleton:
+                restore_conditioned_skeleton(result.asset, batch["model_input"][0].asset, result.detokenize_output)
+                print(f">>> [runtime] AI weights: preserved {result.asset.J} authored bones")
             break
 
         if result is None or result.asset is None:
@@ -428,6 +468,7 @@ class SkinTokensRuntime:
             "target_path": input_path,
             "export_path": out_path,
             "group_per_vertex": options.group_per_vertex,
+            "preserve_skeleton": options.use_skeleton,
         }
         res = _post_bpy_payload("transfer", payload)
 
