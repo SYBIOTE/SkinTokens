@@ -21,7 +21,7 @@ from torch import Tensor
 
 from src.data.dataset import DatasetConfig, RigDatasetModule
 from src.data.transform import Transform
-from src.data.augment import AugmentNormalize
+from src.data.augment import AugmentAffine, AugmentNormalize
 from src.rig_package.weights_only import restore_conditioned_skeleton
 from src.data.vertex_group import voxel_skin
 from src.model.tokenrig import TokenRigResult
@@ -246,10 +246,14 @@ def _transform_for_rig_mode(transform: Transform, use_skeleton: bool) -> Transfo
     """Keep unweighted authored joints when conditioning on an existing rig."""
     if not use_skeleton:
         return transform
-    # Training-time deletion, collapsing, pose and jitter are not authoring edits.
+    # Keep mesh and joints in the same deterministic model-space normalization.
+    # Affine owns scale/shift; Normalize only normalizes surface normals and has
+    # no constructor parameters. Drop training-time topology/pose perturbations.
     augments = [
         replace(augment, random_scale_p=0., random_shift_p=0.)
-        for augment in (transform.augments or []) if isinstance(augment, AugmentNormalize)
+        if isinstance(augment, AugmentAffine) else augment
+        for augment in (transform.augments or [])
+        if isinstance(augment, (AugmentAffine, AugmentNormalize))
     ]
     return replace(transform, order=None, augments=augments)
 
