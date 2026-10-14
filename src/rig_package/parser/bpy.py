@@ -381,10 +381,12 @@ def extract_mesh(bones=None):
             for (second, third) in zip(loop[1:], loop[2:]):
                 faces.append((first, second, third))
                 normals.append(rot @ normal)
-        faces = np.array(faces, dtype=np.int32)
-        normals = np.array(normals, dtype=np.float32)
+        # Empty/point-only mesh parts still occupy a vertex partition. Keep
+        # explicit Nx3 shapes instead of dropping parts and shifting weights.
+        faces = np.asarray(faces, dtype=np.int32).reshape(-1, 3)
+        normals = np.asarray(normals, dtype=np.float32).reshape(-1, 3)
         
-        coords = np.array([v.co for v in obj_verts])
+        coords = np.asarray([v.co for v in obj_verts], dtype=np.float64).reshape(-1, 3)
         rot_np = np.array(rot)
         coords = (rot_np @ coords.T).T + matrix_world_bias
         vertices[0:3, :coords.shape[0]] = coords.T
@@ -427,6 +429,10 @@ def extract_mesh(bones=None):
         vertex_bias.append(cur_vertex_bias)
         face_bias.append(cur_face_bias)
     
+    if not vertices_list or cur_vertex_bias == 0:
+        raise ValueError("Rigging input contains no mesh vertices")
+    if cur_face_bias == 0:
+        raise ValueError("Rigging input contains no triangle surfaces (only empty, point or line meshes)")
     vertices = np.vstack(vertices_list)
     faces = np.vstack(faces_list)
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False, maintain_order=True)
